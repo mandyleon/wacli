@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -169,11 +171,16 @@ func (a *App) Sync(ctx context.Context, opts SyncOptions) (SyncResult, error) {
 	}
 
 	if opts.Mode == SyncModeFollow {
+		cmdTicker := time.NewTicker(5 * time.Second)
+		defer cmdTicker.Stop()
+		cmdFile := filepath.Join(a.opts.StoreDir, "commands.json")
 		for {
 			select {
 			case <-ctx.Done():
 				fmt.Fprintln(os.Stderr, "\nStopping sync.")
 				return SyncResult{MessagesStored: messagesStored.Load()}, nil
+			case <-cmdTicker.C:
+				a.processCommandFile(ctx, cmdFile)
 			case <-disconnected:
 				fmt.Fprintln(os.Stderr, "Reconnecting...")
 				if err := a.wa.ReconnectWithBackoff(ctx, 2*time.Second, 30*time.Second); err != nil {
@@ -424,4 +431,74 @@ func mediaLabel(mediaType string) string {
 	default:
 		return mt
 	}
+}
+
+// syncCommand represents a command sent to the sync process via commands.json.
+type syncCommand struct {
+	Action string `json:"action"` // "clear"
+	JID    string `json:"jid"`    // target chat JID
+}
+
+// syncCommandResult is written to commands_result.json after processing.
+type syncCommandResult struct {
+	Action  string `json:"action"`
+	JID     string `json:"jid"`
+	OK      bool   `json:"ok"`
+	Error   string `json:"error,omitempty"`
+	DoneAt  string `json:"done_at"`
+}
+
+// processCommandFile checks for a commands.json file in the store dir,
+// executes any commands using the active WhatsApp connection, writes
+// the result to commands_result.json, and removes commands.json.
+func (a *App) processCommandFile(ctx context.Context, cmdFile string) {
+	data, err := os.ReadFile(cmdFile)
+	if err != nil {
+		return // file doesn't exist or can't be read — normal
+	}
+
+	var cmd syncCommand
+	if err := json.Unmarshal(data, &cmd); err != nil {
+		fmt.Fprintf(os.Stderr, "[cmd] Invalid commands.json: %v\n", err)
+		os.Remove(cmdFile)
+		return
+	}
+
+	resultFile := filepath.Join(filepath.Dir(cmdFile), "commands_result.json")
+	result := syncCommandResult{
+		Action: cmd.Action,
+		JID:    cmd.JID,
+	}
+
+	switch cmd.Action {
+	case "clear":
+		if cmd.JID == "" {
+			result.Error = "jid is required"
+		} else {
+			target, err := types.ParseJID(cmd.JID)
+			if err != nil {
+				result.Error = fmt.Sprintf("invalid JID: %v", err)
+			} else {
+				fmt.Fprintf(os.Stderr, "[cmd] Clearing chat %s...\n", cmd.JID)
+				if err := a.wa.ClearChat(ctx, target); err != nil {
+					result.Error = fmt.Sprintf("clear failed: %v", err)
+					fmt.Fprintf(os.Stderr, "[cmd] Clear failed: %v\n", err)
+				} else {
+					result.OK = true
+					fmt.Fprintf(os.Stderr, "[cmd] ✅ Chat %s cleared\n", cmd.JID)
+				}
+			}
+		}
+	default:
+		result.Error = fmt.Sprintf("unknown action: %s", cmd.Action)
+	}
+
+	result.DoneAt = time.Now().UTC().Format(time.RFC3339)
+
+	// Write result
+	resData, _ := json.MarshalIndent(result, "", "  ")
+	os.WriteFile(resultFile, resData, 0644)
+
+	// Remove command file
+	os.Remove(cmdFile)
 }

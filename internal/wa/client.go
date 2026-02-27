@@ -11,11 +11,15 @@ import (
 
 	"github.com/mdp/qrterminal/v3"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/appstate"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
+	"go.mau.fi/whatsmeow/proto/waCommon"
+	"go.mau.fi/whatsmeow/proto/waSyncAction"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
+	"google.golang.org/protobuf/proto"
 )
 
 type Options struct {
@@ -347,6 +351,43 @@ func (c *Client) Logout(ctx context.Context) error {
 		return fmt.Errorf("not initialized")
 	}
 	return cli.Logout(ctx)
+}
+
+// ClearChat sends a "clear chat" app-state mutation that removes all messages
+// from the given chat on the local device and all linked devices.
+func (c *Client) ClearChat(ctx context.Context, target types.JID) error {
+	c.mu.Lock()
+	cli := c.client
+	c.mu.Unlock()
+	if cli == nil {
+		return fmt.Errorf("not initialized")
+	}
+
+	now := time.Now().Unix()
+	patch := appstate.PatchInfo{
+		Type: appstate.WAPatchRegularHigh,
+		Mutations: []appstate.MutationInfo{{
+			Index:   []string{appstate.IndexClearChat, target.String(), "1"},
+			Version: 2,
+			Value: &waSyncAction.SyncActionValue{
+				ClearChatAction: &waSyncAction.ClearChatAction{
+					MessageRange: &waSyncAction.SyncActionMessageRange{
+						LastMessageTimestamp: proto.Int64(now),
+						Messages: []*waSyncAction.SyncActionMessage{{
+							Key: &waCommon.MessageKey{
+								RemoteJID: proto.String(target.String()),
+								FromMe:    proto.Bool(false),
+								ID:        proto.String("clear-all"),
+							},
+							Timestamp: proto.Int64(now),
+						}},
+					},
+				},
+			},
+		}},
+	}
+
+	return cli.SendAppState(ctx, patch)
 }
 
 // Reconnect loop helper.

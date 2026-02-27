@@ -18,6 +18,7 @@ func newChatsCmd(flags *rootFlags) *cobra.Command {
 	}
 	cmd.AddCommand(newChatsListCmd(flags))
 	cmd.AddCommand(newChatsShowCmd(flags))
+	cmd.AddCommand(newChatsClearCmd(flags))
 	return cmd
 }
 
